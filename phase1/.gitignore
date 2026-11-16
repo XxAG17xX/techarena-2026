@@ -1,0 +1,5 @@
+# The organisers' data and everything rebuilt from it stay out of git.
+data/
+cache/
+runs/
+submissions/
