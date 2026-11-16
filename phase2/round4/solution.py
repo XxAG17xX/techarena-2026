@@ -74,18 +74,18 @@ THREADS = 8
 # of each list matters, as in the scoring.
 RANKER_SETTINGS = dict(
     objective="lambdarank",
-    n_estimators=160,
     learning_rate=0.035,
     num_leaves=7,
     min_child_samples=300,
     reg_lambda=10,
-    n_jobs=THREADS,
+    num_threads=THREADS,
     verbosity=-1,
-    random_state=2301,
+    seed=2301,
     deterministic=True,
     force_col_wise=True,
     lambdarank_truncation_level=1,
 )
+RANKER_TREES = 160
 
 # Time constants (hours) of the exponentially decayed click counts.
 DECAY_HOURS = [3, 8, 24, 72]
@@ -153,8 +153,11 @@ def log(message):
 
 def read_requests_and_catalogue(data):
     """Read x_pred.csv (rowid, user_id, timestamp) and catalog.csv (itemID, valid_from, valid_to)."""
-    requests = pd.read_csv(data / "x_pred.csv").drop_duplicates("rowid").reset_index(drop=True)
-    catalogue = pd.read_csv(data / "catalog.csv").drop_duplicates("itemID").reset_index(drop=True)
+    # IDs stay text: read as numbers, a rowid like "007" would come back as "7" and stop the run.
+    requests = pd.read_csv(data / "x_pred.csv", dtype={"rowid": str, "user_id": str})
+    requests = requests.drop_duplicates("rowid").reset_index(drop=True)
+    catalogue = pd.read_csv(data / "catalog.csv", dtype={"itemID": str})
+    catalogue = catalogue.drop_duplicates("itemID").reset_index(drop=True)
     return requests, catalogue
 
 
@@ -168,7 +171,8 @@ def read_feedback(data, cutoff):
     try:
         feedback = pd.read_parquet(data / "feedback_long.parquet", columns=columns)
     except Exception:
-        feedback = pd.read_csv(data / "feedback_long.csv", usecols=columns)
+        feedback = pd.read_csv(data / "feedback_long.csv", usecols=columns,
+                               dtype={"event_id": str, "user_id": str, "itemID": str})
     return feedback[feedback.timestamp < cutoff].reset_index(drop=True)
 
 
@@ -527,9 +531,8 @@ def train_and_score(data_dir, out_dir):
     X, labels, list_sizes = history.training_lists()
     if len(list_sizes) < MIN_TRAINING_LISTS:
         raise ValueError("Too few own-click training lists")
-    ranker = lgb.LGBMRanker(**RANKER_SETTINGS)
-    ranker.fit(X, labels, group=list_sizes)
-    model = ranker.booster_
+    # LightGBM's own training call: same model as its scikit-learn wrapper, without needing scikit-learn.
+    model = lgb.train(RANKER_SETTINGS, lgb.Dataset(X, label=labels, group=list_sizes), num_boost_round=RANKER_TREES)
     log("trained on %d lists / %d candidates" % (len(list_sizes), len(labels)))
     del X, labels, list_sizes
 
@@ -571,6 +574,16 @@ def start_worker(data, work_dir, log_file):
     env["OMP_NUM_THREADS"] = str(THREADS)
     command = [sys.executable, str(Path(__file__).resolve()), WORKER_FLAG, str(data), str(work_dir)]
     return subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, env=env)
+
+
+def stop_worker(worker):
+    """Kill the worker if it is still running. A worker that will not exit must not stop the answers."""
+    if worker is not None and worker.poll() is None:
+        worker.kill()
+        try:
+            worker.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log("worker did not exit after kill; continuing")
 
 
 def read_worker_chunk(path, n_requests, n_items, times, valid_from, valid_to):
@@ -667,9 +680,7 @@ def predict(data_dir, batch_size=256):
                         break
                     continue
                 time.sleep(0.05)
-            if worker is not None and worker.poll() is None:
-                worker.kill()
-                worker.wait(timeout=5)
+            stop_worker(worker)
 
             # 4. Anything the worker did not answer gets the rule's pick.
             rest = np.flatnonzero(~answered)
@@ -680,9 +691,7 @@ def predict(data_dir, batch_size=256):
                 answered[rows] = True
                 yield [(str(rowids[j]), str(item_ids[fallback[j]])) for j in rows]
         finally:
-            if worker is not None and worker.poll() is None:
-                worker.kill()
-                worker.wait(timeout=5)
+            stop_worker(worker)
             worker_log.close()
             # Copy the end of the worker's log into the run log.
             try:

@@ -61,6 +61,7 @@ that findings from rounds 1-2 did not carry over.
 
 You need Python 3.12 with pandas, numpy and pyarrow. The organisers' data is not part of this repository.
 The data folder must hold `x_pred.csv`, `catalog.csv` and `feedback_long.parquet` (or `feedback_long.csv`).
+To check the entry without any data, run `python phase2/test_entries.py` from the repository root.
 
 ```
 cd phase2/round3

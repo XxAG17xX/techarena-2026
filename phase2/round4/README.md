@@ -67,10 +67,10 @@ scored, 13.5% of all requests.
 
 ## Run it locally
 
-You need Python 3.12 with pandas, numpy, pyarrow, lightgbm and scikit-learn. LightGBM's `LGBMRanker`
-needs scikit-learn: without it the worker fails and every request quietly falls back to the rule. The
-organisers' data is not part of this repository. The data folder must hold `x_pred.csv`, `catalog.csv`
-and `feedback_long.parquet` (or `feedback_long.csv`).
+You need Python 3.12 with pandas, numpy, pyarrow and lightgbm. The organisers' data is not part of this
+repository. The data folder must hold `x_pred.csv`, `catalog.csv` and `feedback_long.parquet` (or
+`feedback_long.csv`). To check the entry without any data, run `python phase2/test_entries.py` from the
+repository root: it builds a tiny made-up round and checks every request gets exactly one available item.
 
 ```
 cd phase2/round4
@@ -96,9 +96,12 @@ The tidy-up kept the logic, the features, the model settings, the deadline and e
   of training, and one shortened the deadline;
 - removed a check on the number of model inputs, which only mattered for the saved-model switch.
 
-Verification on the round 4 data: three runs of the original and two of this version gave the same item
-for all 400,000 requests, yielded in the same order. Forcing the deadline to zero also gave identical
-output from both versions.
+After a later audit it also reads IDs as text, trains through LightGBM's own `lgb.train` (so scikit-learn
+is no longer needed), and keeps answering if the helper process will not exit.
+
+Verification on the round 4 data: three runs of the original and three of this version gave the same item
+for all 400,000 requests, yielded in the same order, the last one without scikit-learn installed. Forcing
+the deadline to zero also gave identical output from both versions.
 
 Sources: Codex's report on which own click wins in round 4 and its implementation hand-off, and the team's
 working log for round 4 (all 15 November 2026). Counts, runtimes and agreement figures come from local runs.

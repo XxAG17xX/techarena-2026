@@ -18,7 +18,9 @@ chance the user picks your item, if they click anything.
 <a href="round4/"><img src="../assets/figures/explore-round4.svg" alt="Round 4, trained in the run: the ranker entry. LightGBM over each user's past clicks, trained inside the 240-second limit. Opens phase2/round4/." width="100%"></a>
 
 Each folder is exactly one submission: zip its contents and it runs. Each README says what the entry
-does, the measured evidence behind every setting, and how to run it on a laptop.
+does, the measured evidence behind every setting, and how to run it on a laptop. To check both entries
+without any data, run `python phase2/test_entries.py`: it builds a tiny made-up round and checks that
+every request gets exactly one item that is available at its time.
 
 ## The four rounds
 
