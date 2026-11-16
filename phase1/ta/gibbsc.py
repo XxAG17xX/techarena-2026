@@ -6,67 +6,49 @@ the user's recent clicks (the click feedback loop), a replay of a past click, or
 is shown says nothing about taste, but the user's mix also enters the click utility: a user clicks more readily in
 categories that dominate their mix.
 
-GibbsC  keeps a frozen user-by-category table in the utility: the user's shown lift for the item's category, computed
-        leaving out the event's own slate (counts are additive, so this is exact and targets use the same formula),
-        and the category's overall click rate. The lift term also applies to clicks known only from histories, whose
-        unknown slates are drawn the way real slates are: category from the user's mix, item from that category by
+GibbsC  puts the user's category term in the utility, also on clicks known only from histories, whose unknown
+        slates are drawn the way real slates are: category from the user's mix, item from that category by
         popularity. Without that the term ran away.
-GibbsM  samples each user's mix instead of freezing it (the final model). Each sweep proposes a new mix from the
-        Dirichlet posterior given the categories of the user's shown rows, and keeps it with the click likelihood
-        ratio (Metropolis-Hastings with an independence proposal). Main settings of the final families:
+GibbsM  samples each user's mix (the final model) and builds the category term from it. Each sweep proposes a new
+        mix from the Dirichlet posterior given the categories of the user's shown rows, and keeps it with the click
+        likelihood ratio (Metropolis-Hastings; see GibbsM._update_mix). Main settings of the final families:
           lam = 0.4, f_share = item share per category: 40% of the mix is the uniform draw over the catalogue;
           C0 from clean_counts: shown rows explained by the user's recent clicks are taken out of the counts first;
-          floor = 0.7, abs_h = 1.5, abs_w = 0.7: the category term (see _tab0).
+          floor = 0.7, abs_h = 1.5, abs_w = 0.7: the category term (see GibbsM._tab).
 
 The functions after the classes build the frozen inputs (counts, terms) and the end terms of build_ensemble.py.
 """
 
 import numpy as np
-import scipy.sparse as sp
 import torch
 
-from ta import cf, expo
 from ta.data import N_ITEMS, T0
 from ta.gibbsx import GibbsX
 
 
-def terms(A, fit, tgt, nu, z, K, a=20.0):
-    """Standardised (lift, log category rate) for fit events [fit, 10, 2], targets [tgt, 10, 2], and the
-    user-by-category lift table on the same scale."""
-    X = expo.shown_matrix(A, fit, nu)
-    cand = A["cand"][fit]
-    C = np.zeros((nu, K), np.float32)
-    inh = (A["hist"][fit][:, None, :] == cand[:, :, None]).any(-1)
-    np.add.at(C, (np.repeat(A["user"][fit], 10)[~inh.ravel()], z[cand.ravel()[~inh.ravel()]]), 1)
-    g = C.sum(0) / C.sum()
-    N = C.sum(1, keepdims=True)
-    uf, kf = A["user"][fit], z[cand]
-    own = np.zeros(kf.shape, np.float32)
-    for s in range(0, len(fit), 100000):
-        j = slice(s, s + 100000)
-        own[j] = ((kf[j][:, None, :] == kf[j][:, :, None]) & (~inh[j])[:, None, :]).sum(-1)
-    n_own = (~inh).sum(1, keepdims=True).astype(np.float32)
-    lift_f = np.log((C[uf[:, None], kf] - own + a * g[kf]) / (N[uf] - n_own + a) / g[kf])
-    mu, sd = lift_f.mean(), lift_f.std()
-    table = (np.log((C + a * g) / (N + a) / g) - mu) / sd
+def terms(A, fit, tgt, z, K):
+    """The first two extra terms of fit rows [fit, 10, 2] and target rows [tgt, 10, 2]. Column 0 is a placeholder of
+    zeros: GibbsM fills it with the live category term of the sampled mix. Column 1 is the log of the category's
+    overall click rate, standardised over the fit rows."""
+    kf, kt = z[A["cand"][fit]], z[A["cand"][tgt]]
     lab = A["label"][fit]
     hit = lab < 10
     rate = np.bincount(kf[hit, lab[hit]], minlength=K) / np.maximum(np.bincount(kf.ravel(), minlength=K), 1)
     lr = np.log(rate / rate.mean())
     lr = (lr - lr[kf].mean()) / max(lr[kf].std(), 1e-6)
-    xe = np.stack([(lift_f - mu) / sd, lr[kf]], -1).astype(np.float32)
-    xt = np.stack([table[A["user"][tgt][:, None], z[A["cand"][tgt]]], lr[z[A["cand"][tgt]]]], -1).astype(np.float32)
-    return xe, xt, table.astype(np.float32), ((C + a * g) / (N + a)).astype(np.float32)
+    xe = np.stack([np.zeros(kf.shape), lr[kf]], -1).astype(np.float32)
+    xt = np.stack([np.zeros(kt.shape), lr[kt]], -1).astype(np.float32)
+    return xe, xt
 
 
 class GibbsC(GibbsX):
-    """GibbsX with a frozen user-by-category term, also on history clicks, and history-click slates drawn from the
-    user's mix. z: category per item; table: the term per (user, category); pi: the user's mix; pop: item popularity."""
+    """GibbsX with the user's category term on history clicks too, and history-click slates drawn from the user's
+    mix. z: category per item; pop: item popularity. The term table and the mix are set by the subclass (GibbsM)."""
 
-    def __init__(self, *args, z, table, pi, pop, K=11, personal=True, on_history=True, **kw):
+    def __init__(self, *args, z, pop, K=11, personal=True, on_history=True, **kw):
         super().__init__(*args, **kw)
         t = lambda x, ty=torch.float32: torch.as_tensor(np.asarray(x), device=self.dev, dtype=ty)
-        self.z, self.table, self.mix = t(z, torch.long), t(table), t(pi)
+        self.z = t(z, torch.long)
         self.K, self.personal, self.on_history = K, personal, on_history
         pop = t(pop)
         self.members = [torch.nonzero(self.z == k).squeeze(1) for k in range(K)]
@@ -129,12 +111,10 @@ def shown_counts(A, rows, nu, z, K):
 
 
 class GibbsM(GibbsC):
-    """The user's mix is sampled instead of frozen. Generative story: mix -> slate rows -> click, utility has w0 *
-    log(mix / share). Given the slates (known ones, target slates too, and the current fill-ins of history clicks)
-    the mix is Dirichlet, used as an independence proposal, so only the clicks decide acceptance. The first extra
-    term is the live lift, unscaled."""
-
-    consistent_mix_ll = False  # opt-in experiment; existing family caches keep their original meaning
+    """The user's mix is sampled. Generative story: mix -> slate rows -> click, and the utility has w0 times the
+    category term of the mix (see _tab). Given the slates (known ones, target slates too, and the current fill-ins
+    of history clicks) the mix has a Dirichlet posterior, which serves as the proposal of a Metropolis-Hastings
+    step decided by the clicks (see _update_mix). The first extra term is the live category term, unscaled."""
 
     def __init__(
         self,
@@ -142,7 +122,6 @@ class GibbsM(GibbsC):
         C0,
         g,
         a=20.0,
-        i_level=None,
         floor=0.0,
         lam=0.0,
         a_p=8.0,
@@ -151,22 +130,12 @@ class GibbsM(GibbsC):
         no_rel=False,
         f_share=None,
         h_share=None,
-        lin=0.0,
-        pilog=0.0,
-        tau_l=0.0,
-        cat_w=False,
         **kw,
     ):
-        self.cat_w = bool(cat_w)  # the category term with its own strength per category
-        # personal liking of a category beyond the mix, per user and category, N(0, tau_l^2)
-        self.tau_l = float(tau_l)
-        self.pilog = float(pilog)  # term on the personal part of the mix: log(K * personal + pilog)
-        self.lin = float(lin)  # term straight in the share: lin * K * mix
         # term on the absolute share: abs_w * log(max(K * mix, abs_h))
         self.abs_h, self.abs_w, self.no_rel = float(abs_h), float(abs_w), bool(no_rel)
         # mix = lam * overall + (1 - lam) * personal part, personal part Dirichlet(a_p * overall)
         self.lam, self.a_p = float(lam), float(a_p)
-        self.i_level = i_level  # column of the extra terms that holds the mix itself, not its log
         # utility term log(mix / share + floor): flat where a category suits the user poorly
         self.floor = float(floor)
         super().__init__(*args, **kw)
@@ -174,8 +143,6 @@ class GibbsM(GibbsC):
         self.C0, self.g, self.a = t(C0), t(g), float(a)
         self.f_s = self.g if f_share is None else t(f_share)  # floor of the mix
         self.h_s = self.g if h_share is None else t(h_share)  # base of the personal part
-        self.eps, self.sig_e = torch.zeros_like(self.C0), 0.05
-        self.dk, self.sig_k = torch.zeros(self.C0.shape[1], device=self.dev), 0.01
         self.ze, self.zt = self.z[self.ec], self.z[self.tc]
         self._set_mix((self.C0 + self.a * self.g) / (self.C0.sum(1, keepdim=True) + self.a))
         if self.lam:
@@ -184,26 +151,6 @@ class GibbsM(GibbsC):
             self._set_mix(self.lam * self.f_s + (1 - self.lam) * self.pi_p)
 
     def _tab(self, m):
-        """The category term per (user, category) for mix m, with optional per-category strengths."""
-        x = self._tab0(m)
-        return x * (1.0 + self.dk) if self.cat_w else x
-
-    def _update_dk(self, adapt):
-        """Option cat_w: one Metropolis step on the per-category strengths dk (off in the final model)."""
-        cur = self._click_ll(self.table).sum().item() - 0.5 * (self.dk**2).sum().item() / 0.3**2
-        old = self.dk
-        self.dk = old + self.sig_k * torch.randn_like(old)
-        new = self._click_ll(self._tab(self.mix) + self.eps).sum().item() - 0.5 * (self.dk**2).sum().item() / 0.3**2
-        ok = np.log(np.random.random()) < new - cur
-        if ok:
-            self._set_mix(self.mix)
-        else:
-            self.dk = old
-        self.rates["k"] = float(ok)
-        if adapt:
-            self.sig_k = float(np.clip(self.sig_k * np.exp(0.05 * (float(ok) - 0.25)), 1e-3, 0.1))
-
-    def _tab0(self, m):
         """The category term for mix m [users, K], with share g = overall share of the category:
 
             log(m / g + floor) - log(1 + floor)       relative term: how much the user's mix favours the category
@@ -211,10 +158,6 @@ class GibbsM(GibbsC):
 
         floor < 0 gives the hinge log(max(m / g, -floor)) instead; no_rel keeps only the absolute term."""
         ab = self.abs_w * torch.log((m * m.shape[1]).clamp_min(self.abs_h)) if self.abs_h else 0.0
-        if self.lin:
-            ab = ab + self.lin * m * m.shape[1]
-        if self.pilog:
-            ab = ab + torch.log(((m - self.lam * self.f_s) / (1 - self.lam)).clamp_min(0.0) * m.shape[1] + self.pilog)
         if self.no_rel:
             return ab
         if self.floor < 0:  # hinge: no effect below the bend, log(mix / share) above it
@@ -223,22 +166,17 @@ class GibbsM(GibbsC):
 
     def _set_mix(self, m):
         """Install a new mix: rebuild the category table and the first extra term of every slate row."""
-        self.mix, self.table = m, self._tab(m) + self.eps
+        self.mix, self.table = m, self._tab(m)
         self.xe0[..., 0] = self.table[self.eu[:, None], self.ze]
         self.xt0[..., 0] = self.table[self.tu[:, None], self.zt]
-        if self.i_level is not None:
-            self.xe0[..., self.i_level] = torch.exp(self.xe0[..., 0])
-            self.xt0[..., self.i_level] = torch.exp(self.xt0[..., 0])
         self._set_scales(self.sg, self.sn)
 
     def _click_ll(self, L):
         """Log-likelihood of each user's clicks [users] if their category table were L (slate events and history
-        clicks). Only the category term changes between the current and a proposed mix, so only that is swapped."""
+        clicks). Only the category term changes between the current and a proposed mix, so only that is swapped.
+        The history clicks' item term (ItemPreMixin, w[2] * x_item) is left out of this test, as in the published runs,
+        so the mix step uses a slightly simpler likelihood than the rest of the sampler (see the README)."""
         w = self.w[0]
-        wl = self.w[self.i_level] if self.i_level is not None else 0.0
-        extra = lambda x, old: w * (x - old[..., 0]) + (
-            wl * (torch.exp(x) - old[..., self.i_level]) if self.i_level is not None else 0.0
-        )
         ll = torch.zeros(self.nu, device=self.dev)
         for j in self._chunks(len(self.eu)):
             u, y, c = self.eu[j], self.ey[j], self.ec[j]
@@ -246,27 +184,17 @@ class GibbsM(GibbsC):
                 self.alpha * torch.einsum("ed,ejd->ej", self.P[u], self.Q[c])
                 + self.b[c]
                 + self.eo[j]
-                + extra(L[u[:, None], self.ze[j]], self.xe0[j])
+                + w * (L[u[:, None], self.ze[j]] - self.xe0[j][..., 0])
             )
             lg = torch.cat([util, (self.c[u] + self.en[j])[:, None]], 1)
             ll.index_add_(0, u, lg.gather(1, y[:, None]).squeeze(1) - torch.logsumexp(lg, 1))
         for j in self._chunks(len(self.pu)):
             u, c = self.pu[j], self.pa[j]
-            Lc = L[u[:, None], self.z[c]]
             ua = (
                 self._a_pre() * torch.einsum("nd,nkd->nk", self.P[u], self.Q[c])
                 + self.b[c]
-                + w * Lc
-                + (wl * torch.exp(Lc) if self.i_level is not None else 0.0)
+                + w * L[u[:, None], self.z[c]]
             )
-            if self.consistent_mix_ll:
-                # Preserve all history offsets while replacing only the proposed mix term.
-                # ItemPreMixin (and HistTermsMixin) otherwise disappears from this MH ratio.
-                self._j = j
-                old = self.table[u[:, None], self.z[c]]
-                ua = ua + self._pre_x(u, c) - w * old
-                if self.i_level is not None:
-                    ua = ua - wl * torch.exp(old)
             ll.index_add_(0, u, ua[:, 0] - self._pre_den(ua, u))
         return ll
 
@@ -274,16 +202,14 @@ class GibbsM(GibbsC):
         """One Metropolis-Hastings step on every user's mix at once.
 
         The categories of the user's shown rows (the cleaned counts C0, plus the user's history clicks with their
-        current guessed slates) are multinomial draws from the mix, so given them the mix has a Dirichlet
-        posterior. A draw from that posterior is the proposal; because it already accounts for the shown rows, the
-        acceptance ratio is just the ratio of the click likelihoods under the new and the old mix. With lam > 0 the mix
-        is lam * floor + (1 - lam) * personal part: each row is first assigned to the floor or to the personal part
-        (binomial), and only the personal part gets the Dirichlet draw."""
+        current guessed slates) are multinomial draws from the mix, so given them the mix has a Dirichlet posterior.
+        A draw from that posterior is the proposal, and the acceptance test compares the click likelihoods under the
+        new and the old mix. With lam > 0 the mix is lam * floor + (1 - lam) * personal part: each row is first
+        assigned to the floor or to the personal part (binomial, given the current mix), and only the personal part
+        gets the Dirichlet draw. So the proposal depends on the current mix; it is not an independence proposal. The
+        step stays valid because that split is reversible."""
         C = self.C0.clone()
         k, who = self.z[self.pa], self.pu[:, None].expand_as(self.pa)
-        pm = getattr(self, "pm", None)
-        if pm is not None:
-            k, who = k[pm], who[pm]
         C.index_put_((who.ravel(), k.ravel()), torch.ones(k.numel(), device=self.dev), accumulate=True)
         # which rows came from the personal part, then that part given them: reversible for the slates,
         # so the clicks still decide
@@ -297,47 +223,17 @@ class GibbsM(GibbsC):
         else:
             prop = torch.distributions.Gamma(C + self.a * self.g, 1.0).sample().clamp_min(1e-12)
             prop = prop / prop.sum(1, keepdim=True)
-        new_table = self._tab(prop.clamp_min(1e-8)) + self.eps
+        new_table = self._tab(prop.clamp_min(1e-8))
         ok = torch.log(torch.rand(self.nu, device=self.dev)) < self._click_ll(new_table) - self._click_ll(self.table)
         if self.lam:
             self.pi_p = torch.where(ok[:, None], pi_new, self.pi_p)
         self._set_mix(torch.where(ok[:, None], prop, self.mix))
         self.rates["m"] = ok.float().mean().item()
 
-    def _update_eps(self, adapt):
-        """Option tau_l: a personal liking per (user, category) beyond the mix, sampled (off in the final model)."""
-        prop = self.eps + self.sig_e * torch.randn_like(self.eps)
-        new_table = self.table - self.eps + prop
-        lp = lambda e: -0.5 * (e**2).sum(1) / self.tau_l**2
-        ok = torch.log(torch.rand(self.nu, device=self.dev)) < self._click_ll(new_table) - self._click_ll(
-            self.table
-        ) + lp(prop) - lp(self.eps)
-        self.eps = torch.where(ok[:, None], prop, self.eps)
-        self._set_mix(self.mix)
-        rate = ok.float().mean().item()
-        self.rates["e"] = rate
-        if adapt:
-            self.sig_e = float(np.clip(self.sig_e * np.exp(0.05 * (rate - 0.3)), 1e-3, 1.0))
-        rss = (self.eps**2).sum().item()
-        self.tau_l = float(np.sqrt((1.0 + 0.5 * rss) / max(np.random.gamma(1.0 + 0.5 * self.eps.numel()), 1e-6)))
-
-    def _rec_extra(self):
-        return {**super()._rec_extra(), "t_l": round(self.tau_l, 4), "dk": [round(x, 3) for x in self.dk.tolist()]}
-
-    def _pre_x(self, u, c):
-        x = super()._pre_x(u, c)
-        if self.i_level is not None:
-            x = x + self.w[self.i_level] * torch.exp(self.table[u[:, None], self.z[c]])
-        return x
-
     def _after_sweep(self, adapt):
-        """After the taste updates of each sweep: update the mixes (and the optional per-category parts)."""
+        """After the taste updates of each sweep: update the mixes."""
         super()._after_sweep(adapt)
         self._update_mix()
-        if self.tau_l:
-            self._update_eps(adapt)
-        if self.cat_w:
-            self._update_dk(adapt)
 
 
 def clean_counts(A, rows, nu, z, K, a=20.0, iters=30):
@@ -500,48 +396,3 @@ def asof_fine(A, fit, tgt, zf, Kf, gf, z, K, g, floor=0.7, a=20.0):
 
     x = curve(asof(zf, gf, Kf), floor) - curve(asof(z, g, K), floor)
     return x[: len(fit)], x[len(fit) :]
-
-
-def any_facts(A, fit, tgt, nu):
-    """Facts about the odds of any click at target events that the chains leave over, [targets, 6], not centred: has
-    fit events, no warm-up clicks, history length / 20, full 20 warm-up clicks, log of the days those 20 took,
-    history of 1 or 2. An optional end term of build_ensemble.py ("any"), not used by the final file."""
-    u = A["user"][tgt]
-    au, _, at = cf.known_clicks(A, fit, tgt)
-    pre = at < T0
-    n = np.bincount(au[pre], minlength=nu)
-    first = np.full(nu, float(T0))
-    np.minimum.at(first, au[pre], at[pre].astype(float))
-    cens = n >= 20
-    span = cens * np.log((T0 - first) / 86400.0 + 0.1)
-    hl = (A["hist"][tgt] >= 0).sum(1)
-    return np.c_[
-        np.bincount(A["user"][fit], minlength=nu)[u] > 0, n[u] == 0, hl / 20.0, cens[u], span[u], (hl >= 1) & (hl < 3)
-    ].astype(np.float64)
-
-
-def move_any(p, sh):
-    """Probabilities of a slate's rows with the log-odds of any click moved by sh [events]: the rows keep their
-    shares among themselves. Used with any_facts (not by the final file)."""
-    lg = lambda x: np.log(np.clip(x, 1e-7, 1 - 1e-7) / (1 - np.clip(x, 1e-7, 1 - 1e-7)))
-    sg = lambda x: 1 / (1 + np.exp(-x))
-    x0 = lg(p.sum(1))
-    return p * (sg(x0 + sh) / sg(x0))[:, None]
-
-
-def soft_category_term(A, ev, tgt, nu, z, K, th, g_clean, abs_h=1.5, abs_w=0.7, floor=0.7, a=20.0):
-    """The category term averaged over each item's category posterior from the shown rows, minus the term at its
-    label, [targets, 10]. Only rarely shown items move. An optional end term of build_ensemble.py ("soft"), not
-    used by the final file."""
-    X = expo.shown_matrix(A, ev, nu).tocsr()
-    Zm = sp.csr_matrix((np.ones(N_ITEMS), (np.arange(N_ITEMS), z)), shape=(N_ITEMS, K))
-    C = (X @ Zm).toarray()
-    g = np.maximum(C.sum(0) / C.sum(), 1e-5)
-    g /= g.sum()
-    pi = (C + a * g) / (C.sum(1, keepdims=True) + a)
-    sc = X.T @ (np.log(pi) - np.log(g)) + np.log(g)
-    post = np.exp(sc - sc.max(1, keepdims=True))
-    post /= post.sum(1, keepdims=True)
-    cand, u = A["cand"][tgt], A["user"][tgt]
-    Tu = (np.log(th / g_clean + floor) - np.log(1 + floor) + abs_w * np.log(np.maximum(th * K, abs_h)))[u]
-    return (Tu[:, None, :] * post[cand]).sum(2) - np.take_along_axis(Tu, z[cand], 1)

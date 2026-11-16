@@ -51,11 +51,9 @@ class Gibbs:
         q=None,
         K=9,
         pre_outside=False,
-        sample_b=True,
         s_b=0.3,
         chunk=200000,
         seed=0,
-        slate_mh=False,
         fit_scales=False,
     ):
         """ev / tg = dicts u, c [n,10], y (ev only), o [n,10] or None, n [n] or None; pre = (users, items).
@@ -65,7 +63,7 @@ class Gibbs:
         (user vectors, item vectors, item biases, no-click utilities, sharpness). q: how often each item is shown, the
         proposal for guessed slates. chunk: events per GPU batch."""
         self.dev, self.nu, self.ni, self.K, self.pre_outside = dev, n_users, n_items, K, pre_outside
-        self.chunk, self.sample_b, self.s_b, self.slate_mh, self.fit_scales = chunk, sample_b, s_b, slate_mh, fit_scales
+        self.chunk, self.s_b, self.fit_scales = chunk, s_b, fit_scales
         torch.manual_seed(seed)
         t = lambda x, ty: torch.as_tensor(np.asarray(x), device=dev, dtype=ty)
         f, l = torch.float32, torch.long
@@ -96,7 +94,6 @@ class Gibbs:
         self.sig_a = 0.005
         self.mu_c, self.s_c = c.mean().item(), max(c.std().item(), 0.3)
         self.acc, self.n = None, 0
-        self.Pm, self.Qm = torch.zeros_like(self.P), torch.zeros_like(self.Q)
         self.rates = {}
 
     def _chunks(self, n):
@@ -107,21 +104,21 @@ class Gibbs:
         """Log denominator of every history click given guessed slates pa [clicks, 1 + K]."""
         den = torch.empty(len(self.pu), device=self.dev)
         for j in self._chunks(len(self.pu)):
-            u, c, self._j = self.pu[j], pa[j], j
+            u, c = self.pu[j], pa[j]
             ua = self._a_pre() * torch.einsum("nd,nkd->nk", self.P[u], self.Q[c]) + self.b[c] + self._pre_x(u, c)
             den[j] = self._pre_den(ua, u)
         return den
 
     def _new_negatives(self):
-        """Refresh the unknown slates of history clicks. slate_mh: Metropolis on P(slate | click) with the exposure
-        distribution as proposal (accept with P(click | new) / P(click | old)); otherwise plain draws from exposure."""
+        """Refresh the unknown slates of history clicks: Metropolis on P(slate | click) with the exposure distribution
+        as proposal (accept with P(click | new) / P(click | old)); the first sweep takes plain draws from exposure."""
         self.logw = float(np.log(9.0 / self.K))
         if len(self.pi) == 0:
             self.pa = self.pi[:, None]
             return
         neg = torch.multinomial(self.q, len(self.pi) * self.K, replacement=True).view(-1, self.K)
         prop = torch.cat([self.pi[:, None], neg], 1)
-        if self.slate_mh and getattr(self, "pa", None) is not None:
+        if getattr(self, "pa", None) is not None:
             # Independence Metropolis: the proposal is the prior of slates, so the acceptance ratio is just the ratio of
             # P(click | slate) = exp(u_click) / denominator, i.e. old denominator / new denominator.
             ok = torch.log(torch.rand(len(self.pi), device=self.dev)) < self._pre_den_all(self.pa) - self._pre_den_all(
@@ -146,25 +143,18 @@ class Gibbs:
             u, y = self.eu[j], self.ey[j]
             util = self.alpha * torch.einsum("ed,ejd->ej", V[u], Qc[j]) + bo[j]
             lg = torch.cat([util, (self.c[u] + self.en[j])[:, None]], 1)
-            ll.index_add_(0, u, self.tau_e * (lg.gather(1, y[:, None]).squeeze(1) - torch.logsumexp(lg, 1)))
+            ll.index_add_(0, u, lg.gather(1, y[:, None]).squeeze(1) - torch.logsumexp(lg, 1))
         for j in self._chunks(len(self.pu)):
             u = self.pu[j]
             ua = self._a_pre() * torch.einsum("nd,nkd->nk", V[u], Qa[j]) + ba[j]
-            ll.index_add_(0, u, self.tau_h * (ua[:, 0] - self._pre_den(ua, u)))
+            ll.index_add_(0, u, ua[:, 0] - self._pre_den(ua, u))
         return ll
-
-    _j = slice(None)  # which history clicks the current _pre_x call covers
-    # same for slate events: both below 1 give a warm posterior for the vectors
-    tau_e = 1.0
-    # weight of the likelihood of history clicks, 1 is the model as it stands
-    tau_h = 1.0
 
     def _update_users(self, steps, adapt):
         """Random-walk Metropolis on the sphere for every user vector at once. The prior is uniform on the sphere, so
         a proposal (current vector plus Gaussian noise, renormalised) is kept with probability
         min(1, exp(new log-likelihood - old log-likelihood)). The step is symmetric, so no proposal correction."""
         Qc, bo = self.Q[self.ec], self.b[self.ec] + self.eo
-        self._j = slice(None)
         Qa, ba = self.Q[self.pa], self.b[self.pa] + self._pre_x(self.pu, self.pa)
         ll = self._user_ll(self.P, Qc, Qa, bo, ba)
         rate = 0.0
@@ -240,7 +230,7 @@ class Gibbs:
             loglam[j] = torch.log(torch.empty_like(lg[:, 0]).exponential_()) - torch.logsumexp(lg, 1)
         loglam_a = torch.empty(len(self.pu), device=self.dev)
         for j in self._chunks(len(self.pu)):
-            u, self._j = self.pu[j], j
+            u = self.pu[j]
             ua = (
                 self._a_pre() * torch.einsum("nd,nkd->nk", self.P[u], self.Q[self.pa[j]])
                 + self.b[self.pa[j]]
@@ -256,22 +246,22 @@ class Gibbs:
         for j in self._chunks(len(self.eu)):
             c, y = self.ec[j], self.ey[j]
             util = self.alpha * torch.einsum("ed,ejd->ej", self.P[self.eu[j]], Q[c]) + b[c] + self.eo[j]
-            ll.index_add_(0, c.ravel(), self.tau_e * (-torch.exp(loglam[j][:, None] + util)).ravel())
+            ll.index_add_(0, c.ravel(), (-torch.exp(loglam[j][:, None] + util)).ravel())
             k = (y < 10).nonzero().squeeze(1)
-            ll.index_add_(0, c[k, y[k]], self.tau_e * util[k, y[k]])
+            ll.index_add_(0, c[k, y[k]], util[k, y[k]])
         return self._item_ll_pre(ll, Q, b, loglam_a)
 
     def _item_ll_pre(self, ll, Q, b, loglam_a):
         """The same for history clicks and their guessed slates (fill-in items weighted by exp(logw))."""
         for j in self._chunks(len(self.pu)):
-            c, self._j = self.pa[j], j
+            c = self.pa[j]
             ua = (
                 self._a_pre() * torch.einsum("nd,nkd->nk", self.P[self.pu[j]], Q[c]) + b[c] + self._pre_x(self.pu[j], c)
             )
             term = -torch.exp(loglam_a[j][:, None] + ua)
             term[:, 1:] = term[:, 1:] * np.exp(self.logw)
-            ll.index_add_(0, c.ravel(), self.tau_h * term.ravel())
-            ll.index_add_(0, c[:, 0], self.tau_h * ua[:, 0])
+            ll.index_add_(0, c.ravel(), term.ravel())
+            ll.index_add_(0, c[:, 0], ua[:, 0])
         return ll
 
     def _update_items(self, steps, adapt):
@@ -290,19 +280,18 @@ class Gibbs:
                 self.sig_i = (self.sig_i * torch.exp(0.05 * (ok.float() - 0.3))).clamp(1e-3, 2.0)
             rate += ok.float().mean().item() / steps
         self.rates["i"] = rate
-        if self.sample_b:
-            prior = lambda b: -0.5 * (b / self.s_b) ** 2
-            cur = ll + prior(self.b)
-            prop = self.b + self.sig_b * torch.randn_like(self.b)
-            new = self._item_ll(self.Q, prop, loglam, loglam_a) + prior(prop)
-            ok = torch.log(torch.rand(self.ni, device=self.dev)) < new - cur
-            self.b = torch.where(ok, prop, self.b)
-            if adapt:
-                self.sig_b = (self.sig_b * torch.exp(0.05 * (ok.float() - 0.3))).clamp(1e-3, 2.0)
-            self.rates["b"] = ok.float().mean().item()
-            self.s_b = float(
-                np.sqrt((1.0 + 0.5 * (self.b**2).sum().item()) / max(np.random.gamma(1.0 + 0.5 * self.ni), 1e-6))
-            )
+        prior = lambda b: -0.5 * (b / self.s_b) ** 2
+        cur = ll + prior(self.b)
+        prop = self.b + self.sig_b * torch.randn_like(self.b)
+        new = self._item_ll(self.Q, prop, loglam, loglam_a) + prior(prop)
+        ok = torch.log(torch.rand(self.ni, device=self.dev)) < new - cur
+        self.b = torch.where(ok, prop, self.b)
+        if adapt:
+            self.sig_b = (self.sig_b * torch.exp(0.05 * (ok.float() - 0.3))).clamp(1e-3, 2.0)
+        self.rates["b"] = ok.float().mean().item()
+        self.s_b = float(
+            np.sqrt((1.0 + 0.5 * (self.b**2).sum().item()) / max(np.random.gamma(1.0 + 0.5 * self.ni), 1e-6))
+        )
 
     # ---- sharpness (global, shared proposal)
     def _total_ll(self, alpha):
@@ -315,7 +304,7 @@ class Gibbs:
             lg = torch.cat([util, (self.c[u] + self.en[j])[:, None]], 1)
             total += (lg.gather(1, y[:, None]).squeeze(1) - torch.logsumexp(lg, 1)).sum().item()
         for j in self._chunks(len(self.pu)):
-            u, c, self._j = self.pu[j], self.pa[j], j
+            u, c = self.pu[j], self.pa[j]
             ua = self._a_pre() * torch.einsum("nd,nkd->nk", self.P[u], self.Q[c]) + self.b[c] + self._pre_x(u, c)
             total += (ua[:, 0] - self._pre_den(ua, u)).sum().item()
         self.alpha = keep
@@ -394,10 +383,7 @@ class Gibbs:
         alpha_every=2,
         label=None,
         log_every=25,
-        quality=None,
-        callback=None,
         pause=0.0,
-        extra_draws=0,
     ):
         """Run the chain: `sweeps` sweeps, the first `burn` adapt step sizes and are discarded, then every `every`-th
         sweep is averaged into the prediction. label (targets' clicks, when known) adds AUC to the progress log.
@@ -416,21 +402,12 @@ class Gibbs:
                 self._update_scales()
             self._after_sweep(adapt)
             # the likelihood cannot see a shift of all b and all c together: pin it
-            if self.sample_b:
-                d = self.b.mean()
-                self.b, self.c = self.b - d, self.c - d
+            d = self.b.mean()
+            self.b, self.c = self.b - d, self.c - d
             if s >= burn and (s - burn) % every == 0:
                 p = self.predict()
                 self.acc = p if self.acc is None else self.acc + p
                 self.n += 1
-                self.Pm += self.P
-                self.Qm += self.Q
-                # users and c given the items mix fast: more of them per saved sample
-                for _ in range(extra_draws):
-                    self._update_users(1, False)
-                    self._update_c(1, False)
-                    self.acc = self.acc + self.predict()
-                    self.n += 1
             if s % log_every == 0 or s == sweeps - 1:
                 rec = {
                     "sweep": s,
@@ -450,12 +427,6 @@ class Gibbs:
                     rec["single"] = auc_report(self.predict().cpu().numpy(), label)["auc"]
                     if self.n:
                         rec.update({("avg_" + k): v for k, v in auc_report(self.mean_prediction(), label).items()})
-                if quality is not None:
-                    rec["q_now"] = quality(self.P.cpu().numpy(), self.Q.cpu().numpy())
-                    if self.n:
-                        rec["q_mean"] = quality(self.Pm.cpu().numpy(), self.Qm.cpu().numpy())
                 print(rec, flush=True)
                 hist.append(rec)
-                if callback is not None:
-                    callback(self, rec)
         return hist

@@ -13,6 +13,8 @@ One row per event, training events first, then evaluation events:
 Every other module works on this dict of arrays (called `A` throughout).
 """
 
+import os
+
 import numpy as np
 import polars as pl
 
@@ -43,6 +45,7 @@ def _build():
     for split in ["train", "eval"]:
         e = pl.read_parquet(DATA / f"{split}_events.parquet").sort("event")
         r = pl.read_parquet(DATA / f"{split}_rows.parquet")
+        assert (r["event"].to_numpy() == np.repeat(e["event"].to_numpy(), 10)).all(), f"{split} rows not in event order"
         hist, hlen = _pad(e["hist_items"], np.int32, -1)
         hist_ts, _ = _pad(e["hist_ts"], np.int64, 0)
         cand = r["item"].to_numpy().astype(np.int32).reshape(-1, 10)
@@ -73,11 +76,17 @@ def load():
     f = CACHE / "arrays.npz"
     if not f.exists():
         CACHE.mkdir(exist_ok=True)
-        np.savez(f, **_build())
+        tmp = f.with_name(f"{f.stem}.tmp{os.getpid()}.npz")  # write, then rename: readers never see half a file
+        np.savez(tmp, **_build())
+        os.replace(tmp, f)
     z = np.load(f)
     return {k: z[k] for k in z.files}
 
 
 def eval_rowids():
     """rowid strings for eval events, shape [E_eval, 10], aligned with the eval part of load()."""
-    return pl.read_parquet(DATA / "eval_rows.parquet")["rowid"].to_numpy().reshape(-1, 10)
+    r = pl.read_parquet(DATA / "eval_rows.parquet", columns=["event", "rowid"])
+    assert (
+        r["event"].to_numpy() == np.repeat(np.unique(r["event"].to_numpy()), 10)
+    ).all(), "eval rows not in event order"
+    return r["rowid"].to_numpy().reshape(-1, 10)

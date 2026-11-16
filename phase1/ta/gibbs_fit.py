@@ -21,7 +21,7 @@ def point_start(A, EF, CFa, c, nu, fit, tgt, seed, T, epochs=None):
     cfg = {**stack.MNL8T_CFG, "d": 8, "seed": seed}
     if epochs:
         cfg["epochs"] = epochs
-    model, p, _ = mnl.train(A, EF, CFa, fit, tgt, cfg, T=T, verbose=False, init=(U, V), early_stop=False)
+    model, p, _ = mnl.train(A, EF, CFa, fit, tgt, cfg, T=T, init=(U, V))
     dev = T.u.device
     with torch.no_grad():
         fe, te = torch.as_tensor(fit, device=dev), torch.as_tensor(tgt, device=dev)

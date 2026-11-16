@@ -14,37 +14,10 @@ from ta.harness import fold
 from ta.paths import CACHE
 
 BPR = dict(k=128, lr=0.02, reg=0.01, iters=400, seeds=(0,))
-# The point-estimate choice model is built up in steps; each line adds to the one before.
-# 8-dim cosine choice model on user vectors only, plus a sampled-softmax loss on clicks known only from histories
-MNL8A_CFG = dict(
-    use_P=True,
-    use_Y=False,
-    init_Y=True,
-    cosine=True,
-    alpha0=5.0,
-    aux_w=1.0,
-    l2_item=0.03,
-    l2_bias=0.03,
-    lr=5e-4,
-    epochs=18,
-)
-# + confidence shrinkage of user and item directions by their known clicks
-MNL8C_CFG = {**MNL8A_CFG, "conf": True, "conf_item": True, "epochs": 24}
-# + history-click competitors drawn in proportion to item exposure, and settings from a hyperparameter search:
-# stronger user and item penalties, sharpness start 3, 32 epochs, batch 4096
-MNL8H_CFG = {
-    **MNL8C_CFG,
-    "aux_q": True,
-    "epochs": 32,
-    "l2_item": 0.1,
-    "l2_bias": 0.03,
-    "l2_user": 0.1,
-    "batch": 4096,
-    "alpha0": 3.0,
-}
-# The final start: those settings, 40 epochs, started from an aligned average of 5 BPR fits. The seed picks which
-# 5 BPR fits are averaged (0: 0-4, 1: 5-9, 2: 10-14, 3: 15-19, then a random 5 of 0-19), so runs differ in start.
-MNL8T_CFG = {**MNL8H_CFG, "epochs": 40}
+# The point-estimate choice model of the final start (ta/mnl.py, with d = 8 from ta/gibbs_fit.py): sharpness start 3,
+# the history-click loss at weight 1, user / item / bias penalties, 40 epochs of batch 4096. It starts from an aligned
+# average of 5 BPR fits; the run's seed picks which 5 (0: 0-4, 1: 5-9, 2: 10-14, 3: 15-19, then a random 5 of 0-19).
+MNL8T_CFG = dict(alpha0=3.0, aux_w=1.0, l2_item=0.1, l2_bias=0.03, l2_user=0.1, lr=5e-4, epochs=40, batch=4096)
 
 
 def avg_bpr(seed):

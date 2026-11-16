@@ -16,7 +16,7 @@ from ta.gibbs import Gibbs
 class GibbsX(Gibbs):
     """Gibbs plus frozen extra utility terms with sampled weights."""
 
-    def __init__(self, *args, xe, xt, w0, pre_uv=None, **kw):
+    def __init__(self, *args, xe, xt, w0, **kw):
         """xe [fit, 10, m], xt [targets, 10, m], standardised outside; w0 = starting multipliers."""
         super().__init__(*args, **kw)
         t = lambda x: torch.as_tensor(np.asarray(x), device=self.dev, dtype=torch.float32)
@@ -24,7 +24,6 @@ class GibbsX(Gibbs):
         self.w = [float(x) for x in w0]
         self.sig_w = [0.03] * len(self.w)
         self._burning = True
-        self.pre_uv = None if pre_uv is None else tuple(t(x) for x in pre_uv[:2]) + tuple(pre_uv[2:])
         self._set_scales(self.sg, self.sn)
 
     def _set_scales(self, sg, sn):
@@ -62,14 +61,6 @@ class GibbsX(Gibbs):
                 self._set_scales(self.sg, self.sn)
             if self._burning:
                 self.sig_w[k] = float(np.clip(self.sig_w[k] * np.exp(0.05 * (float(ok) - 0.3)), 1e-3, 0.1))
-
-    def _pre_x(self, u, c):
-        """History clicks: the user affinity term applies to them too, with the same multiplier (pre_uv = exposure U,
-        V, mean, sd)."""
-        if getattr(self, "pre_uv", None) is None:
-            return 0.0
-        U, V, mu, sd = self.pre_uv
-        return self.w[0] * (torch.einsum("nd,nkd->nk", U[u], V[c]) - mu) / sd
 
     def _after_sweep(self, adapt):
         """Remember whether we are still in burn-in, when the weights' step sizes adapt."""

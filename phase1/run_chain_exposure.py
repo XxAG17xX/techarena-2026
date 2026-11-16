@@ -1,14 +1,16 @@
 """One sampler run of the exposure family (ta/gibbsx.GibbsX) per (cutoff, seed): the choice model plus the three
 exposure scores of ta/expo.py as frozen utility terms with sampled weights.
 
-    python run_chain_exposure.py <cutoffs> <seeds> <part>/<parts> <sweeps> <burn> <every> [new3] [prefix]
+    python run_chain_exposure.py <cutoffs> <seeds> <part>/<parts> <sweeps> <burn> <every> <options> <prefix>
 
-Writes cache/<prefix>_<cutoff>_s<seed>.npy (default prefix gibbsx). Needs a CUDA GPU and the exposure scores first
-(make_exposure.py: cache/expo_mean_<cutoff>.npz). The final file uses this family as "gibbsx": evaluation cutoff
-1737936000, 2000 sweeps, 500 burn-in, every 2, without the new3 option.
+Writes cache/<prefix>_<cutoff>_s<seed>.npy and one journal record (with the options) in runs/journal.jsonl. Needs a
+CUDA GPU and the exposure scores first (make_exposure.py: cache/expo_mean_<cutoff>.npz). The final file uses this
+family as "gibbsx": evaluation cutoff 1737936000, 2000 sweeps, 500 burn-in, every 2, options "-" (none):
 
-new3 adds the newest-3 fine-group matches (seed-0 groupings with 20 groups) as a 4th term with its own sampled weight
-(prefix gibbsxn3; tested, not in the final file).
+    python run_chain_exposure.py 1737936000 0,1,2 0/1 2000 500 2 - gibbsx
+
+The option new3 adds the newest-3 fine-group matches (seed-0 groupings with 20 groups) as a 4th term with its own
+sampled weight (prefix gibbsxn3; tested, not in the final file).
 """
 
 import json
@@ -27,11 +29,15 @@ from ta.data import N_ITEMS, T0  # noqa: E402
 from ta.harness import auc_report, fold, log_run  # noqa: E402
 from ta.paths import CACHE  # noqa: E402
 
+if len(sys.argv) != 9:
+    sys.exit(
+        "usage: python run_chain_exposure.py <cutoffs> <seeds> <part>/<parts> <sweeps> <burn> <every> <options> "
+        "<prefix>"
+    )
 cuts, seeds, part = [int(c) for c in sys.argv[1].split(",")], [int(s) for s in sys.argv[2].split(",")], sys.argv[3]
 sweeps, burn, every = int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
 k, parts = map(int, part.split("/"))
-opts = sys.argv[7].split(",") if len(sys.argv) > 7 else []
-prefix = sys.argv[8] if len(sys.argv) > 8 else "gibbsx"
+opts, prefix = sys.argv[7].split(","), sys.argv[8]  # options: "new3" or "-" for none
 todo = [(c, s) for c in cuts for s in seeds][k::parts]
 A = data.load()
 EF, CFa = features.load(A)
@@ -75,7 +81,6 @@ for c, s in todo:
         q=q,
         pre_outside=False,
         chunk=150000,
-        slate_mh=True,
         fit_scales=True,
         seed=s,
         xe=xe,
@@ -103,6 +108,7 @@ for c, s in todo:
         f"{prefix}_chain",
         cutoff=c,
         seed=s,
+        opts=sys.argv[7],
         sweeps=sweeps,
         burn=burn,
         every=every,

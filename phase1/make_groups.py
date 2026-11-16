@@ -13,6 +13,7 @@ of the momentum, newest-3 and as-of terms, and the 20-group families), e.g.
 CPU only. TA_BPR_THREADS caps the BPR threads.
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -38,7 +39,9 @@ for c in cuts[k::parts]:
     t0 = time.time()
     fit, t = fold(A, c)
     z, pi, g, next_agree = cats.fit_merge(A, np.r_[fit, t], nu, K=K, seed=seed)
-    np.savez(f, z=z, pi=pi, g=g)
+    tmp = f.with_name(f"{f.stem}.tmp{os.getpid()}.npz")  # write, then rename: readers never see half a file
+    np.savez(tmp, z=z, pi=pi, g=g)
+    os.replace(tmp, f)
     print(
         c,
         "sizes",

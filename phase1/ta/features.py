@@ -9,6 +9,8 @@ how often was it shown to them) feed a small repeat-click network. The sampler k
 offset with a sampled multiplier.
 """
 
+import os
+
 import numpy as np
 
 from ta.data import H
@@ -44,8 +46,10 @@ def load(A):
     """(EF [E, len(EF_NAMES)], CF [E, 10, len(CF_NAMES)]), cached in cache/."""
     fe, fc = CACHE / "EF.npy", CACHE / "CF.npy"
     if not (fe.exists() and fc.exists()):
-        np.save(fe, event_features(A))
-        np.save(fc, cand_features(A))
+        for f, build in ((fe, event_features), (fc, cand_features)):
+            tmp = f.with_name(f"{f.stem}.tmp{os.getpid()}.npy")  # write, then rename: readers never see half a file
+            np.save(tmp, build(A))
+            os.replace(tmp, f)
     return np.load(fe), np.load(fc)
 
 

@@ -116,7 +116,11 @@ block at a time given the others.
   Given $\lambda_e$, the likelihood factorises over items, so all items also move in parallel.
 - **Sharpness and term weights**: one Metropolis step each, on the total likelihood.
 - **Users' mixes** $\pi_u$: a proposal from the Dirichlet posterior given the categories of the user's shown rows,
-  kept with the ratio of click likelihoods (Metropolis-Hastings with an independence proposal).
+  kept or rejected by comparing the click likelihoods under the new and the old mix (Metropolis-Hastings). Two
+  details, kept as published: that test leaves out the item term of history clicks (the item's history-click rate,
+  weight $w_2$; an option called `mixll` would have included it and was off in every published run). And with the
+  40% floor the proposal depends on the current mix, so it is not an independence proposal; the step is still valid
+  because the split of each row between floor and personal part is drawn reversibly.
 - **History clicks.** Clicks known only from a user's history have no recorded slate. Their 9 missing slate items are
   guessed the way real slates are drawn (category from the user's mix, item by popularity), and the guess is updated
   every sweep by a Metropolis step.
@@ -144,13 +148,13 @@ run returns averaged probabilities rather than averaged vectors. One run took ab
 | `ta/cats.py` | Item groups found in the shown rows (over-split, then merge) |
 | `ta/stack.py` | Settings and cached BPR fits for the starting point (the rest of the old feature stack is gone) |
 | `ta/mnl.py` | The gradient-trained choice model that gives each run its start |
-| `ta/ranking.py`, `ta/history_likelihood.py` | Optional losses of `ta/mnl.py`; off in the final model |
 | `ta/gibbs_fit.py` | The starting point of a run |
 | `ta/gibbs.py` | The base sampler: users, items, no-click utilities, sharpness, history-click slates |
 | `ta/gibbsx.py` | Adds frozen utility terms with sampled weights |
 | `ta/gibbsc.py` | Adds exposure: the sampled user mixes, the category term, and the builders of all other terms |
 | `ta/gibbsn.py` | Optional layers on a sampler class (history clicks, slate-only biases, item term, user prior) |
 | `ta/submit.py` | Writes and checks the submission CSV |
+| `test_sampler.py` | Checks that the sampler recovers known values in a simulated world (no data needed) |
 
 ## Running it
 
@@ -166,18 +170,25 @@ for s in 0 1 2 3 4 5 6 7; do python make_groups.py 1737936000 0/1 20 $s; done
 python make_exposure.py 1737936000 10 0,1,2 0/1
 # sampler runs (GPU): 1737936000 is the end of the training window, i.e. predict the evaluation file
 python run_chain.py 1737936000 0,1,2,3 0/1 1500 400 2 "clean,pre,floor=0.7,user,fbk=20,asof,lam=0.4,pa=8,fit,abs=1.5,absw=0.7" gibbsq1
-python run_chain_exposure.py 1737936000 0,1,2,3 0/1 2000 500 2
+python run_chain_exposure.py 1737936000 0,1,2,3 0/1 2000 500 2 - gibbsx
 # the ensemble (the full command of the final file is in build_ensemble.py's docstring)
 python build_ensemble.py my_file "gibbsq1=0.5,gibbsx=0.5" "ctx=1.0" 0,1,2,3
 ```
 
 `run_chain.py` with 1500 sweeps runs the chain for 1500 sweeps, discards the first 400 and averages every second sweep
-after that. `0/1` is "worker 0 of 1": several workers can share one list of seeds. A validation run uses a cutoff
-inside the training window instead (for example 1737849600, 26 January), and then logs its AUC.
+after that. `0/1` is "worker 0 of 1": several workers can share one list of seeds. The last two arguments are the
+options (`-` for none) and the family name ("prefix") the run files are saved under; both are required, and the
+options are recorded with each run in `runs/journal.jsonl`. A validation run uses a cutoff inside the training window
+instead (for example 1737849600, 26 January), and then logs its AUC.
 
-The code was cleaned for reading without changing what it computes: apart from removed dead code and two path fixes,
-the cleaned files parse to the same program as the originals. It was not re-run at full size after the cleanup; a run
-of both versions on a 3,000-user slice of the data (short chains, CPU) gave identical outputs.
+`python test_sampler.py` (or `pytest test_sampler.py`) simulates a small world from the model above with known values
+and checks that the sampler gets the sharpness back and predicts nearly as well as the true probabilities; it takes
+about a minute on a CPU and needs no data.
+
+The code was cleaned for reading without changing what it computes. Unused options and code were removed, a few
+robustness fixes were added (required run names, cache files written atomically, input order checked), and the rest
+parses to the same program as the competition code. It was not re-run at full size after the cleanup; a run of both
+versions on a 3,000-user slice of the data (short chains, CPU) gave bit-identical predictions.
 
 ## The ensemble
 
@@ -228,6 +239,9 @@ These were built and tested during the week, then left out of the final file. Th
   sharpness for history clicks, history slates that replay recent clicks, momentum terms on history clicks.
 - **Other exposure terms:** category lift from clicks, replay rates, fine-group lift, history-click momentum tables.
 - **Plain sampler:** the sampler without exposure terms.
+- **Other run options and end terms:** momentum on the 10 categories, a personal category liking, per-category
+  strengths, the time-of-day table inside the sampler, BPR exposure terms in the main family, other forms of the
+  category term, newest-3 matches averaged inside the sampler, extra no-click facts, and six other end terms.
 - **Diagnostics:** AUC broken down by return horizon and user activity.
 
 <img src="../assets/figures/divider.svg" alt="" width="100%">

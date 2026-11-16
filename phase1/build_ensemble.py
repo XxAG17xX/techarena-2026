@@ -27,7 +27,7 @@ End terms of the final file (each computed from the data, on top of what the run
                     minus a little of the estimate the runs used (weight n3u): the runs lean on the noise in their
                     own grouping
   afo, afu, afk     the same for the as-of fine-group term
-Other end terms (raw, clean, hinge, soft, z0, any) were explored and are not in the final file.
+Other end terms were explored during the competition and are not included.
 """
 
 import sys
@@ -61,55 +61,36 @@ lg = lambda p: np.log(np.clip(p, 1e-7, 1 - 1e-7) / (1 - np.clip(p, 1e-7, 1 - 1e-
 # ---- families: average each family's runs as probabilities, then mix the families' log-odds
 tot = sum(w.values())
 z_ = np.zeros((len(t), 10))
-for n, v in w.items():
-    if manifest is None and (CACHE / f"pred_{n}_eval.npy").exists():  # a prediction file already built under that name
-        z_ += v / tot * lg(np.load(CACHE / f"pred_{n}_eval.npy").reshape(-1, 10))
-    else:
-        if manifest is not None:
-            entries = manifest["families"][n]
-            files = []
-            for entry in entries:
-                assert entry["name"] == f"{n}_{CUT}_s{int(entry['seed'])}.npy"
-                f = CACHE / entry["name"]
-                assert hashlib.sha256(f.read_bytes()).hexdigest() == entry["sha256"], f
-                files.append(f)
-            actual_seeds[n] = [entry["seed"] for entry in entries]
-        else:  # every listed seed whose run file exists
-            files = [CACHE / f"{n}_{CUT}_s{s}.npy" for s in seeds if (CACHE / f"{n}_{CUT}_s{s}.npy").exists()]
-            actual_seeds[n] = [int(f.stem.rsplit("_s", 1)[1]) for f in files]
-        chains = [np.load(f, allow_pickle=False) for f in files]
-        assert chains and all(c.shape == (len(t), 10) and np.isfinite(c).all() for c in chains), n
-        print(n, "chains", len(chains), "weight", round(v / tot, 3), flush=True)
-        z_ += v / tot * lg(np.mean(chains, 0))
+for n, v in w.items():  # a family always comes from its run files
+    if manifest is not None:
+        entries = manifest["families"][n]
+        files = []
+        for entry in entries:
+            assert entry["name"] == f"{n}_{CUT}_s{int(entry['seed'])}.npy"
+            f = CACHE / entry["name"]
+            assert hashlib.sha256(f.read_bytes()).hexdigest() == entry["sha256"], f
+            files.append(f)
+        actual_seeds[n] = [entry["seed"] for entry in entries]
+    else:  # every listed seed whose run file exists
+        files = [CACHE / f"{n}_{CUT}_s{s}.npy" for s in seeds if (CACHE / f"{n}_{CUT}_s{s}.npy").exists()]
+        actual_seeds[n] = [int(f.stem.rsplit("_s", 1)[1]) for f in files]
+    chains = [np.load(f, allow_pickle=False) for f in files]
+    assert chains and all(c.shape == (len(t), 10) and np.isfinite(c).all() for c in chains), n
+    print(n, "chains", len(chains), "weight", round(v / tot, 3), flush=True)
+    z_ += v / tot * lg(np.mean(chains, 0))
 
 # ---- end terms, on the log-odds scale (k = the category of each shown row, u = its user)
 if add:
     z = np.load(CACHE / f"cats3_{CUT}_k10.npz")["z"]
     k, u = z[A["cand"][t]], A["user"][t]
-    if "raw" in add:
-        C = gibbsc.shown_counts(A, fit, nu, z, K) + gibbsc.shown_counts(A, t, nu, z, K)
-        g = C.sum(0) / C.sum()
-        z_ += add["raw"] * np.log((C + 20 * g) / (C.sum(1, keepdims=True) + 20) / g)[u[:, None], k]
-    if "clean" in add or "lift2" in add or "hinge" in add or "abs" in add or "soft" in add:
+    if "lift2" in add or "abs" in add:
         Cc, gc, _ = gibbsc.clean_counts(A, np.r_[fit, t], nu, z, K)
         r_ = ((Cc + 20 * gc) / (Cc.sum(1, keepdims=True) + 20) / gc)[u[:, None], k]
         lift = np.log(r_)
-        z_ += add.get("clean", 0.0) * lift + add.get("lift2", 0.0) * lift**2
+        z_ += add.get("lift2", 0.0) * lift**2
         if "abs" in add:  # what is left of the term on the absolute share after the chains
             a_ = ((Cc + 20 * gc) / (Cc.sum(1, keepdims=True) + 20))[u[:, None], k]
             z_ += add["abs"] * np.log(np.maximum(a_, add.get("abend", 0.18))) + add.get("oldf", 0.0) * np.log(r_ + 0.7)
-        # the category effect is flat below the bend: correct the form the chains hold
-        if "hinge" in add:
-            z_ += add["hinge"] * np.log(np.maximum(r_, add.get("bend", 1.4))) + add.get("oldf", 0.0) * np.log(r_ + 0.7)
-    # rarely shown items: the category term over the item's category posterior
-    if "soft" in add:
-        th_ = (Cc + 20 * gc) / (Cc.sum(1, keepdims=True) + 20)
-        ds = gibbsc.soft_category_term(A, np.r_[fit, t], t, nu, z, K, th_, gc)
-        print("soft category term: rows moved more than .05:", round(float(np.mean(np.abs(ds) > 0.05)), 4), flush=True)
-        z_ += add["soft"] * ds
-    if "z0" in add:  # users with almost no known clicks click less than their chains expect
-        h_ = (A["hist"][t] >= 0).sum(1)
-        z_ -= (add["z0"] * (h_ == 0) + add.get("z1", 0.0) * ((h_ >= 1) & (h_ < 3)))[:, None]
     # newest-3 matches on fine groups the newest-3 runs did not use (seeds 1 ... n3k),
     # minus a little of the seed-0 ones they did
     if "n3o" in add:
@@ -143,12 +124,6 @@ if add:
         print("context table sd on eval rows", round(float(x.std()), 4), flush=True)
         z_ += add["ctx"] * x
 p = 1 / (1 + np.exp(-z_))
-# what is left of the odds of any click, coefficients fitted on both validation folds
-if "any" in add:
-    F_ = gibbsc.any_facts(A, fit, t, nu)
-    p = gibbsc.move_any(
-        p, add["any"] * ((F_ - F_.mean(0)) @ np.array([0.0433, -0.3164, 0.0751, 0.1654, -0.0849, -0.0065]))
-    )
 assert np.isfinite(p).all() and p.shape == (len(t), 10)
 
 # ---- write and log
