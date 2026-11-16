@@ -401,7 +401,9 @@ def draw_arena(b, css, *, cx, cy, radius, gap, ux, head_y, team_x):
         b.append(f'<g class="pop" style="animation-delay:{1.3 + 0.1 * "ABC".index(item):.2f}s">'
                  f'<circle cx="{cx}" cy="{iy}" r="26" fill="{C["lime"] if mine else C["chip"]}" stroke="{C["carbon"]}" '
                  f'stroke-width="3"/>' + t(cx, iy + 9, item, 28, "b8 dark" if mine else "b8", anchor="middle") + "</g>")
-        b.append(t(cx + 46, iy - 14, f"{share[item]}%", 19, "b7 fade" if mine else "muted fade", delay=2.3))
+        # each share sits on the open side of its link: C's link climbs to the user, so its label goes below
+        label_y = iy + 32 if item == "C" else iy - 14
+        b.append(t(cx + 46, label_y, f"{share[item]}%", 19, "b7 fade" if mine else "muted fade", delay=2.3))
     b.append(f'<g class="pop" style="animation-delay:2.4s"><circle cx="{ux}" cy="{cy}" r="34" fill="{C["panel"]}" '
              f'stroke="{C["ink2"]}" stroke-width="2"/><circle cx="{ux}" cy="{cy - 9}" r="9" fill="{C["ink2"]}"/>'
              f'<path d="M{ux - 16},{cy + 18} Q{ux},{cy - 4} {ux + 16},{cy + 18}" fill="{C["ink2"]}"/></g>')

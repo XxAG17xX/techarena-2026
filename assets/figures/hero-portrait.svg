@@ -97,7 +97,7 @@
 <text x="418.0" y="882.0" font-size="19" class="b7 fade" style="animation-delay:2.30s">55%</text>
 <path d="M398,970 C468.0,970 516.0,896 578,896" pathLength="1" fill="none" stroke="#343a44" stroke-width="4.5" stroke-linecap="round" class="draw" style="animation-delay:1.7s;animation-duration:.9s"/>
 <g class="pop" style="animation-delay:1.50s"><circle cx="372" cy="970" r="26" fill="#2b3039" stroke="#0b0d10" stroke-width="3"/><text x="372.0" y="979.0" font-size="28" text-anchor="middle" class="b8">C</text></g>
-<text x="418.0" y="956.0" font-size="19" class="muted fade" style="animation-delay:2.30s">20%</text>
+<text x="418.0" y="1002.0" font-size="19" class="muted fade" style="animation-delay:2.30s">20%</text>
 <g class="pop" style="animation-delay:2.4s"><circle cx="612" cy="896" r="34" fill="#151920" stroke="#c3c9d4" stroke-width="2"/><circle cx="612" cy="887" r="9" fill="#c3c9d4"/><path d="M596,914 Q612,892 628,914" fill="#c3c9d4"/></g>
 <text x="612.0" y="960.0" font-size="16" text-anchor="middle" class="muted fade" style="animation-delay:2.60s">picks B 55% of</text>
 <text x="612.0" y="980.0" font-size="16" text-anchor="middle" class="muted fade" style="animation-delay:2.60s">the time it clicks</text>
